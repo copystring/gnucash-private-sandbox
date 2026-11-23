@@ -117,8 +117,21 @@ restore_environment (const char *name, const char *value)
         g_unsetenv (name);
 }
 
+/* Death tests fork the test binary by default. On macOS the Objective-C
+ * runtime may be initializing in another thread when the fork happens, which
+ * crashes the child instead of reporting the expected error. Re-execute the
+ * test binary there rather than forking it. */
+static void
+select_death_test_style ()
+{
+#ifdef __APPLE__
+    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+#endif
+}
+
 TEST (ObjectReferencesTemplateDeathTest, MissingTemplateAborts)
 {
+    select_death_test_style ();
     auto directory = g_dir_make_tmp ("gnc-object-references-XXXXXX", nullptr);
     auto previous_uninstalled = g_strdup (g_getenv ("GNC_UNINSTALLED"));
     auto previous_builddir = g_strdup (g_getenv ("GNC_BUILDDIR"));
@@ -151,6 +164,7 @@ protected:
 
 TEST_P (ObjectReferencesInvalidTemplateDeathTest, AbortsOnInvalidTemplate)
 {
+    select_death_test_style ();
     const auto invalid = GetParam ();
     auto directory = g_dir_make_tmp ("gnc-object-template-XXXXXX", nullptr);
     auto previous_uninstalled = g_strdup (g_getenv ("GNC_UNINSTALLED"));
