@@ -15,6 +15,23 @@ namespace
 {
 static bool s_have_display = false;
 
+/* Makes sure that the font machinery is initialized on the main thread. On
+ * macOS the Objective-C runtime initializes font classes on a background
+ * thread; a death test forks the process, and a fork while such an
+ * initialization is in progress makes the child crash instead of reporting the
+ * expected error. Loading a font before the fork lets the initialization
+ * finish first. */
+static void
+initialize_fonts ()
+{
+    if (!s_have_display)
+        return;
+    auto label = GTK_LABEL (gtk_label_new ("gnucash"));
+    PangoRectangle extents;
+    pango_layout_get_extents (gtk_label_get_layout (label), nullptr, &extents);
+    g_object_unref (label);
+}
+
 struct NamedInstance
 {
     QofInstance parent;
@@ -51,6 +68,7 @@ class GtkEnvironment : public ::testing::Environment
         bind_textdomain_codeset ("gnucash", "UTF-8");
         g_free (locale_directory);
         s_have_display = gtk_init_check (nullptr, nullptr);
+        initialize_fonts ();
     }
 };
 [[maybe_unused]] auto gtk_environment = ::testing::AddGlobalTestEnvironment (new GtkEnvironment);
@@ -116,24 +134,12 @@ restore_environment (const char *name, const char *value)
         g_unsetenv (name);
 }
 
-/* Death tests fork the test binary by default. On macOS the Objective-C
- * runtime may be initializing in another thread when the fork happens, which
- * crashes the child instead of reporting the expected error. Re-execute the
- * test binary there rather than forking it. */
-static void
-select_death_test_style ()
-{
-#ifdef __APPLE__
-    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
-#endif
-}
-
 /* The death tests have to run before any object references dialog is
  * created: the template is loaded once per process, so a dialog created
  * earlier would keep the child process from seeing the broken template. */
 TEST (ObjectReferencesTemplateDeathTest, MissingTemplateAborts)
 {
-    select_death_test_style ();
+    initialize_fonts ();
     auto directory = g_dir_make_tmp ("gnc-object-references-XXXXXX", nullptr);
     auto previous_uninstalled = g_strdup (g_getenv ("GNC_UNINSTALLED"));
     auto previous_builddir = g_strdup (g_getenv ("GNC_BUILDDIR"));
@@ -166,7 +172,7 @@ protected:
 
 TEST_P (ObjectReferencesInvalidTemplateDeathTest, AbortsOnInvalidTemplate)
 {
-    select_death_test_style ();
+    initialize_fonts ();
     const auto invalid = GetParam ();
     auto directory = g_dir_make_tmp ("gnc-object-template-XXXXXX", nullptr);
     auto previous_uninstalled = g_strdup (g_getenv ("GNC_UNINSTALLED"));
