@@ -5,7 +5,6 @@
 #include <gtk/gtk.h>
 #include <glib/gstdio.h>
 #include <gtest/gtest.h>
-#include <cstdlib>
 #include <clocale>
 #include <libintl.h>
 #include "qofinstance.h"
@@ -129,6 +128,9 @@ select_death_test_style ()
 #endif
 }
 
+/* The death tests have to run before any object references dialog is
+ * created: the template is loaded once per process, so a dialog created
+ * earlier would keep the child process from seeing the broken template. */
 TEST (ObjectReferencesTemplateDeathTest, MissingTemplateAborts)
 {
     select_death_test_style ();

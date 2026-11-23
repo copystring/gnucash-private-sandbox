@@ -70,8 +70,6 @@ gnc_object_references_dialog_set_property (GObject *object, guint prop_id,
                                            const GValue *value, GParamSpec *pspec)
 {
     GncObjectReferencesDialog *self = GNC_OBJECT_REFERENCES_DIALOG (object);
-    if (!self->listview)
-        return;
     switch (prop_id)
     {
     case PROP_EXPLANATION:
@@ -100,8 +98,6 @@ gnc_object_references_dialog_get_property (GObject *object, guint prop_id,
                                            GValue *value, GParamSpec *pspec)
 {
     GncObjectReferencesDialog *self = GNC_OBJECT_REFERENCES_DIALOG (object);
-    if (!self->listview)
-        return;
     switch (prop_id)
     {
     case PROP_EXPLANATION:
