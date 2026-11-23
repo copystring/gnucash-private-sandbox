@@ -5,7 +5,6 @@
 #include <gtk/gtk.h>
 #include <glib/gstdio.h>
 #include <gtest/gtest.h>
-#include <cstdlib>
 #include <clocale>
 #include <libintl.h>
 #include "qofinstance.h"
@@ -15,6 +14,23 @@
 namespace
 {
 static bool s_have_display = false;
+
+/* Makes sure that the font machinery is initialized on the main thread. On
+ * macOS the Objective-C runtime initializes font classes on a background
+ * thread; a death test forks the process, and a fork while such an
+ * initialization is in progress makes the child crash instead of reporting the
+ * expected error. Loading a font before the fork lets the initialization
+ * finish first. */
+static void
+initialize_fonts ()
+{
+    if (!s_have_display)
+        return;
+    auto label = GTK_LABEL (gtk_label_new ("gnucash"));
+    PangoRectangle extents;
+    pango_layout_get_extents (gtk_label_get_layout (label), nullptr, &extents);
+    g_object_unref (label);
+}
 
 struct NamedInstance
 {
@@ -52,6 +68,7 @@ class GtkEnvironment : public ::testing::Environment
         bind_textdomain_codeset ("gnucash", "UTF-8");
         g_free (locale_directory);
         s_have_display = gtk_init_check (nullptr, nullptr);
+        initialize_fonts ();
     }
 };
 [[maybe_unused]] auto gtk_environment = ::testing::AddGlobalTestEnvironment (new GtkEnvironment);
@@ -107,27 +124,35 @@ protected:
     }
 };
 
-TEST (ObjectReferencesTemplateTest, MissingTemplateDoesNotAbortOrShowDialog)
+/* Restores an environment variable to the value it had before the test. */
+static void
+restore_environment (const char *name, const char *value)
 {
-    if (!s_have_display)
-        GTEST_SKIP () << "Object references template test requires a GTK display";
-    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
-    EXPECT_EXIT (
-        {
-            auto directory = g_dir_make_tmp ("gnc-object-references-XXXXXX", nullptr);
-            g_setenv ("GNC_UNINSTALLED", "YES", TRUE);
-            g_setenv ("GNC_BUILDDIR", directory, TRUE);
-            g_test_expect_message ("gnc.gui", G_LOG_LEVEL_WARNING, "*Could not load object references dialog:*");
-            gnc_ui_object_references_show ("Unavailable template", nullptr);
-            g_test_assert_expected_messages ();
-            auto windows = gtk_window_list_toplevels ();
-            bool empty = windows == nullptr;
-            g_list_free (windows);
-            g_rmdir (directory);
-            g_free (directory);
-            std::exit (empty ? 0 : 1);
-        },
-        ::testing::ExitedWithCode (0), "");
+    if (value)
+        g_setenv (name, value, TRUE);
+    else
+        g_unsetenv (name);
+}
+
+/* The death tests have to run before any object references dialog is
+ * created: the template is loaded once per process, so a dialog created
+ * earlier would keep the child process from seeing the broken template. */
+TEST (ObjectReferencesTemplateDeathTest, MissingTemplateAborts)
+{
+    initialize_fonts ();
+    auto directory = g_dir_make_tmp ("gnc-object-references-XXXXXX", nullptr);
+    auto previous_uninstalled = g_strdup (g_getenv ("GNC_UNINSTALLED"));
+    auto previous_builddir = g_strdup (g_getenv ("GNC_BUILDDIR"));
+    g_setenv ("GNC_UNINSTALLED", "YES", TRUE);
+    g_setenv ("GNC_BUILDDIR", directory, TRUE);
+    EXPECT_DEATH (gnc_ui_object_references_show ("Unavailable template", nullptr),
+                  "Could not load object references dialog");
+    restore_environment ("GNC_UNINSTALLED", previous_uninstalled);
+    restore_environment ("GNC_BUILDDIR", previous_builddir);
+    g_free (previous_uninstalled);
+    g_free (previous_builddir);
+    g_rmdir (directory);
+    g_free (directory);
 }
 
 struct InvalidTemplate
@@ -135,7 +160,7 @@ struct InvalidTemplate
     const char *xml;
 };
 
-class ObjectReferencesInvalidTemplateTest : public ::testing::TestWithParam<InvalidTemplate>
+class ObjectReferencesInvalidTemplateDeathTest : public ::testing::TestWithParam<InvalidTemplate>
 {
 protected:
     void SetUp () override
@@ -145,48 +170,44 @@ protected:
     }
 };
 
-TEST_P (ObjectReferencesInvalidTemplateTest, DoesNotShowIncompleteDialog)
+TEST_P (ObjectReferencesInvalidTemplateDeathTest, AbortsOnInvalidTemplate)
 {
-    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
-    EXPECT_EXIT (
+    initialize_fonts ();
+    const auto invalid = GetParam ();
+    auto directory = g_dir_make_tmp ("gnc-object-template-XXXXXX", nullptr);
+    auto previous_uninstalled = g_strdup (g_getenv ("GNC_UNINSTALLED"));
+    auto previous_builddir = g_strdup (g_getenv ("GNC_BUILDDIR"));
+    g_setenv ("GNC_UNINSTALLED", "YES", TRUE);
+    g_setenv ("GNC_BUILDDIR", directory, TRUE);
+    auto ui_directory = gnc_path_get_gtkbuilderdir ();
+    g_mkdir_with_parents (ui_directory, 0700);
+    auto filename = g_build_filename (ui_directory, "dialog-object-references.glade", nullptr);
+    ASSERT_TRUE (g_file_set_contents (filename, invalid.xml, -1, nullptr));
+    EXPECT_DEATH (gnc_ui_object_references_show ("Invalid template", nullptr),
+                  "Could not initialize object references dialog template");
+    g_remove (filename);
+    g_free (filename);
+    for (auto path = ui_directory; g_str_has_prefix (path, directory);)
+    {
+        g_rmdir (path);
+        auto parent = g_path_get_dirname (path);
+        g_free (path);
+        path = parent;
+        if (!g_str_has_prefix (path, directory))
         {
-            const auto invalid = GetParam ();
-            auto directory = g_dir_make_tmp ("gnc-object-template-XXXXXX", nullptr);
-            g_setenv ("GNC_UNINSTALLED", "YES", TRUE);
-            g_setenv ("GNC_BUILDDIR", directory, TRUE);
-            auto ui_directory = gnc_path_get_gtkbuilderdir ();
-            g_mkdir_with_parents (ui_directory, 0700);
-            auto filename = g_build_filename (ui_directory, "dialog-object-references.glade", nullptr);
-            if (!g_file_set_contents (filename, invalid.xml, -1, nullptr))
-                std::exit (2);
-            g_test_expect_message ("gnc.gui", G_LOG_LEVEL_WARNING,
-                                   "*Could not initialize object references dialog template*");
-            gnc_ui_object_references_show ("Invalid template", nullptr);
-            g_test_assert_expected_messages ();
-            auto windows = gtk_window_list_toplevels ();
-            bool empty = windows == nullptr;
-            g_list_free (windows);
-            g_remove (filename);
-            g_free (filename);
-            for (auto path = ui_directory; g_str_has_prefix (path, directory);)
-            {
-                g_rmdir (path);
-                auto parent = g_path_get_dirname (path);
-                g_free (path);
-                path = parent;
-                if (!g_str_has_prefix (path, directory))
-                {
-                    g_free (path);
-                    break;
-                }
-            }
-            g_free (directory);
-            std::exit (empty ? 0 : 1);
-        },
-        ::testing::ExitedWithCode (0), ".*");
+            g_free (path);
+            break;
+        }
+    }
+    restore_environment ("GNC_UNINSTALLED", previous_uninstalled);
+    restore_environment ("GNC_BUILDDIR", previous_builddir);
+    g_free (previous_uninstalled);
+    g_free (previous_builddir);
+    g_rmdir (directory);
+    g_free (directory);
 }
 
-INSTANTIATE_TEST_SUITE_P (InvalidFiles, ObjectReferencesInvalidTemplateTest,
+INSTANTIATE_TEST_SUITE_P (InvalidFiles, ObjectReferencesInvalidTemplateDeathTest,
     ::testing::Values (
         InvalidTemplate {"<interface><broken></interface>"},
         InvalidTemplate {"<interface><template class=\"OtherDialog\" parent=\"GtkDialog\"/></interface>"},
