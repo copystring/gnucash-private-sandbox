@@ -47,21 +47,14 @@ enum
     PROP_OBJECT_LIST
 };
 
-static gboolean template_loaded = FALSE;
-
 G_DEFINE_TYPE (GncObjectReferencesDialog, gnc_object_references_dialog, GTK_TYPE_DIALOG)
 
 static void
 gnc_object_references_dialog_init (GncObjectReferencesDialog *self)
 {
-    if (!template_loaded)
-        return;
     gtk_widget_init_template (GTK_WIDGET (self));
     if (!GTK_IS_LABEL (self->lbl_explanation) || !GTK_IS_BOX (self->hbox_list))
-    {
-        g_warning ("Could not initialize object references dialog template");
-        return;
-    }
+        g_error ("Could not initialize object references dialog template");
     gtk_widget_set_name (GTK_WIDGET (self), "gnc-id-object-reference");
     GtkListStore *store = gtk_list_store_new (1, G_TYPE_STRING);
     self->listview = GTK_TREE_VIEW (gtk_tree_view_new_with_model (GTK_TREE_MODEL (store)));
@@ -141,16 +134,11 @@ gnc_object_references_dialog_class_init (GncObjectReferencesDialogClass *klass)
     g_free (filename);
     g_free (directory);
     if (!loaded)
-    {
-        g_warning ("Could not load object references dialog: %s", error->message);
-        g_error_free (error);
-        return;
-    }
+        g_error ("Could not load object references dialog: %s", error->message);
     GBytes *template = g_bytes_new_take (contents, length);
     GtkWidgetClass *widget_class = GTK_WIDGET_CLASS (klass);
     gtk_widget_class_set_template (widget_class, template);
     g_bytes_unref (template);
-    template_loaded = TRUE;
     gtk_widget_class_bind_template_child (widget_class, GncObjectReferencesDialog, lbl_explanation);
     gtk_widget_class_bind_template_child (widget_class, GncObjectReferencesDialog, hbox_list);
 }
@@ -166,18 +154,9 @@ gnc_object_references_dialog_response_cb (GtkDialog *dialog,
 void
 gnc_ui_object_references_show (const gchar *explanation_text, GList *objlist)
 {
-    gpointer dialog_class = g_type_class_ref (GNC_TYPE_OBJECT_REFERENCES_DIALOG);
-    g_type_class_unref (dialog_class);
-    if (!template_loaded)
-        return;
     GtkWidget *dialog = g_object_new (GNC_TYPE_OBJECT_REFERENCES_DIALOG,
                                       "explanation", explanation_text,
                                       "object-list", objlist, "modal", TRUE, NULL);
-    if (!GNC_OBJECT_REFERENCES_DIALOG (dialog)->listview)
-    {
-        gtk_widget_destroy (dialog);
-        return;
-    }
     g_signal_connect (dialog, "response", G_CALLBACK (gnc_object_references_dialog_response_cb), NULL);
     gtk_widget_show_all (dialog);
 }
