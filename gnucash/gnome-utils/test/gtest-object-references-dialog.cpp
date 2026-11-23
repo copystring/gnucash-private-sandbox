@@ -15,23 +15,6 @@ namespace
 {
 static bool s_have_display = false;
 
-/* Makes sure that the font machinery is initialized on the main thread. On
- * macOS the Objective-C runtime initializes font classes on a background
- * thread; a death test forks the process, and a fork while such an
- * initialization is in progress makes the child crash instead of reporting the
- * expected error. Loading a font before the fork lets the initialization
- * finish first. */
-static void
-initialize_fonts ()
-{
-    if (!s_have_display)
-        return;
-    auto label = GTK_LABEL (gtk_label_new ("gnucash"));
-    PangoRectangle extents;
-    pango_layout_get_extents (gtk_label_get_layout (label), nullptr, &extents);
-    g_object_unref (label);
-}
-
 struct NamedInstance
 {
     QofInstance parent;
@@ -68,8 +51,7 @@ class GtkEnvironment : public ::testing::Environment
         bind_textdomain_codeset ("gnucash", "UTF-8");
         g_free (locale_directory);
         s_have_display = gtk_init_check (nullptr, nullptr);
-        initialize_fonts ();
-    }
+        }
 };
 [[maybe_unused]] auto gtk_environment = ::testing::AddGlobalTestEnvironment (new GtkEnvironment);
 
@@ -134,19 +116,57 @@ restore_environment (const char *name, const char *value)
         g_unsetenv (name);
 }
 
-/* The death tests have to run before any object references dialog is
- * created: the template is loaded once per process, so a dialog created
- * earlier would keep the child process from seeing the broken template. */
-TEST (ObjectReferencesTemplateDeathTest, MissingTemplateAborts)
+/* Count the visible toplevel windows of the given type. */
+static int
+count_visible_toplevels (GType type)
 {
-    initialize_fonts ();
+    int count = 0;
+    auto toplevels = gtk_window_list_toplevels ();
+    for (auto item = toplevels; item != nullptr; item = item->next)
+    {
+        auto window = GTK_WINDOW (item->data);
+        if (G_TYPE_CHECK_INSTANCE_TYPE (window, type) &&
+            gtk_widget_get_visible (GTK_WIDGET (window)))
+            count++;
+    }
+    g_list_free (toplevels);
+    return count;
+}
+
+/* Close the message boxes which report a failure. */
+static void
+close_message_boxes ()
+{
+    auto toplevels = gtk_window_list_toplevels ();
+    auto boxes = g_list_copy (toplevels);
+    g_list_free (toplevels);
+    for (auto item = boxes; item != nullptr; item = item->next)
+    {
+        auto window = GTK_WINDOW (item->data);
+        if (G_TYPE_CHECK_INSTANCE_TYPE (window, GTK_TYPE_MESSAGE_DIALOG) &&
+            gtk_widget_get_visible (GTK_WIDGET (window)))
+            gtk_widget_destroy (GTK_WIDGET (window));
+    }
+    g_list_free (boxes);
+}
+
+TEST (ObjectReferencesTemplateTest, MissingTemplateIsReported)
+{
+    if (!s_have_display)
+        GTEST_SKIP () << "Object references template test requires a GTK display";
     auto directory = g_dir_make_tmp ("gnc-object-references-XXXXXX", nullptr);
     auto previous_uninstalled = g_strdup (g_getenv ("GNC_UNINSTALLED"));
     auto previous_builddir = g_strdup (g_getenv ("GNC_BUILDDIR"));
     g_setenv ("GNC_UNINSTALLED", "YES", TRUE);
     g_setenv ("GNC_BUILDDIR", directory, TRUE);
-    EXPECT_DEATH (gnc_ui_object_references_show ("Unavailable template", nullptr),
-                  "Could not load object references dialog");
+
+    gnc_ui_object_references_show ("Unavailable template", nullptr);
+
+    /* The dialog must not be shown; the failure must be reported instead. */
+    EXPECT_EQ (count_visible_toplevels (GNC_TYPE_OBJECT_REFERENCES_DIALOG), 0);
+    EXPECT_EQ (count_visible_toplevels (GTK_TYPE_MESSAGE_DIALOG), 1);
+    close_message_boxes ();
+
     restore_environment ("GNC_UNINSTALLED", previous_uninstalled);
     restore_environment ("GNC_BUILDDIR", previous_builddir);
     g_free (previous_uninstalled);
@@ -155,12 +175,13 @@ TEST (ObjectReferencesTemplateDeathTest, MissingTemplateAborts)
     g_free (directory);
 }
 
+
 struct InvalidTemplate
 {
     const char *xml;
 };
 
-class ObjectReferencesInvalidTemplateDeathTest : public ::testing::TestWithParam<InvalidTemplate>
+class ObjectReferencesInvalidTemplateTest : public ::testing::TestWithParam<InvalidTemplate>
 {
 protected:
     void SetUp () override
@@ -170,9 +191,8 @@ protected:
     }
 };
 
-TEST_P (ObjectReferencesInvalidTemplateDeathTest, AbortsOnInvalidTemplate)
+TEST_P (ObjectReferencesInvalidTemplateTest, InvalidTemplateIsReported)
 {
-    initialize_fonts ();
     const auto invalid = GetParam ();
     auto directory = g_dir_make_tmp ("gnc-object-template-XXXXXX", nullptr);
     auto previous_uninstalled = g_strdup (g_getenv ("GNC_UNINSTALLED"));
@@ -180,25 +200,28 @@ TEST_P (ObjectReferencesInvalidTemplateDeathTest, AbortsOnInvalidTemplate)
     g_setenv ("GNC_UNINSTALLED", "YES", TRUE);
     g_setenv ("GNC_BUILDDIR", directory, TRUE);
     auto ui_directory = gnc_path_get_gtkbuilderdir ();
-    g_mkdir_with_parents (ui_directory, 0700);
-    auto filename = g_build_filename (ui_directory, "dialog-object-references.glade", nullptr);
-    ASSERT_TRUE (g_file_set_contents (filename, invalid.xml, -1, nullptr));
-    EXPECT_DEATH (gnc_ui_object_references_show ("Invalid template", nullptr),
-                  "Could not initialize object references dialog template");
+    g_mkdir_with_parents (ui_directory, 0755);
+    auto filename = g_build_filename (ui_directory, "dialog-object-references.glade", NULL);
+    g_file_set_contents (filename, invalid.xml, -1, nullptr);
+
+    gnc_ui_object_references_show ("Invalid template", nullptr);
+
+    /* The dialog must not be shown; the failure must be reported instead. */
+    EXPECT_EQ (count_visible_toplevels (GNC_TYPE_OBJECT_REFERENCES_DIALOG), 0);
+    EXPECT_EQ (count_visible_toplevels (GTK_TYPE_MESSAGE_DIALOG), 1);
+    close_message_boxes ();
+
     g_remove (filename);
     g_free (filename);
-    for (auto path = ui_directory; g_str_has_prefix (path, directory);)
+    auto path = ui_directory;
+    while (g_str_has_prefix (path, directory))
     {
         g_rmdir (path);
         auto parent = g_path_get_dirname (path);
         g_free (path);
         path = parent;
-        if (!g_str_has_prefix (path, directory))
-        {
-            g_free (path);
-            break;
-        }
     }
+    g_free (path);
     restore_environment ("GNC_UNINSTALLED", previous_uninstalled);
     restore_environment ("GNC_BUILDDIR", previous_builddir);
     g_free (previous_uninstalled);
@@ -207,7 +230,7 @@ TEST_P (ObjectReferencesInvalidTemplateDeathTest, AbortsOnInvalidTemplate)
     g_free (directory);
 }
 
-INSTANTIATE_TEST_SUITE_P (InvalidFiles, ObjectReferencesInvalidTemplateDeathTest,
+INSTANTIATE_TEST_SUITE_P (InvalidFiles, ObjectReferencesInvalidTemplateTest,
     ::testing::Values (
         InvalidTemplate {"<interface><broken></interface>"},
         InvalidTemplate {"<interface><template class=\"OtherDialog\" parent=\"GtkDialog\"/></interface>"},

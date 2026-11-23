@@ -38,6 +38,7 @@ struct _GncObjectReferencesDialog
     GtkLabel *lbl_explanation;
     GtkWidget *hbox_list;
     GtkTreeView *listview;
+    gboolean template_loaded;
 };
 
 enum
@@ -49,13 +50,75 @@ enum
 
 G_DEFINE_TYPE (GncObjectReferencesDialog, gnc_object_references_dialog, GTK_TYPE_DIALOG)
 
+/* Report a failure to the user.  A message box is used instead of
+ * gnc_error_dialog() because the latter runs a nested main loop which
+ * would block the caller until the user closes the message box. */
+static void
+gnc_object_references_dialog_report_error (const gchar *message)
+{
+    GtkWidget *message_box = gtk_message_dialog_new (NULL, GTK_DIALOG_MODAL,
+                                                     GTK_MESSAGE_ERROR,
+                                                     GTK_BUTTONS_CLOSE, "%s", message);
+    g_signal_connect (message_box, "response", G_CALLBACK (gtk_widget_destroy), NULL);
+    gtk_widget_show_all (message_box);
+}
+
+/* Load the dialog template for this instance.  The template is loaded per
+ * instance instead of once per class so that a missing or broken template
+ * is reported to the user instead of aborting the program. */
+static gboolean
+gnc_object_references_dialog_load_template (GncObjectReferencesDialog *self)
+{
+    gchar *directory = gnc_path_get_gtkbuilderdir ();
+    gchar *filename = g_build_filename (directory, "dialog-object-references.glade", NULL);
+    gchar *contents = NULL;
+    gsize length = 0;
+    GError *error = NULL;
+
+    if (!g_file_get_contents (filename, &contents, &length, &error))
+    {
+        PWARN ("Could not load object references dialog template %s: %s",
+               filename, error->message);
+        g_clear_error (&error);
+        g_free (filename);
+        g_free (directory);
+        return FALSE;
+    }
+    g_free (filename);
+    g_free (directory);
+
+    GtkBuilder *builder = gtk_builder_new ();
+    if (!gtk_builder_extend_with_template (builder, GTK_WIDGET (self),
+                                           GNC_TYPE_OBJECT_REFERENCES_DIALOG,
+                                           contents, length, &error))
+    {
+        PWARN ("Could not parse object references dialog template: %s", error->message);
+        g_clear_error (&error);
+        g_object_unref (builder);
+        g_free (contents);
+        return FALSE;
+    }
+    g_free (contents);
+
+    self->lbl_explanation = GTK_LABEL (gtk_builder_get_object (builder, "lbl_explanation"));
+    self->hbox_list = GTK_WIDGET (gtk_builder_get_object (builder, "hbox_list"));
+    g_object_unref (builder);
+
+    return GTK_IS_LABEL (self->lbl_explanation) && GTK_IS_BOX (self->hbox_list);
+}
+
 static void
 gnc_object_references_dialog_init (GncObjectReferencesDialog *self)
 {
-    gtk_widget_init_template (GTK_WIDGET (self));
-    if (!GTK_IS_LABEL (self->lbl_explanation) || !GTK_IS_BOX (self->hbox_list))
-        g_error ("Could not initialize object references dialog template");
     gtk_widget_set_name (GTK_WIDGET (self), "gnc-id-object-reference");
+    if (!gnc_object_references_dialog_load_template (self))
+    {
+        PWARN ("Could not initialize object references dialog template");
+        gnc_object_references_dialog_report_error
+            (_("Could not display the objects referring to this one."));
+        return;
+    }
+    self->template_loaded = TRUE;
     GtkListStore *store = gtk_list_store_new (1, G_TYPE_STRING);
     self->listview = GTK_TREE_VIEW (gtk_tree_view_new_with_model (GTK_TREE_MODEL (store)));
     g_object_unref (store);
@@ -73,10 +136,13 @@ gnc_object_references_dialog_set_property (GObject *object, guint prop_id,
     switch (prop_id)
     {
     case PROP_EXPLANATION:
-        gtk_label_set_text (self->lbl_explanation, g_value_get_string (value));
+        if (self->lbl_explanation != NULL)
+            gtk_label_set_text (self->lbl_explanation, g_value_get_string (value));
         break;
     case PROP_OBJECT_LIST:
     {
+        if (self->listview == NULL)
+            break;
         GtkListStore *store = GTK_LIST_STORE (gtk_tree_view_get_model (self->listview));
         for (const GList *node = g_value_get_pointer (value); node; node = node->next)
         {
@@ -101,7 +167,8 @@ gnc_object_references_dialog_get_property (GObject *object, guint prop_id,
     switch (prop_id)
     {
     case PROP_EXPLANATION:
-        g_value_set_string (value, gtk_label_get_text (self->lbl_explanation));
+        g_value_set_string (value, self->lbl_explanation != NULL
+                            ? gtk_label_get_text (self->lbl_explanation) : NULL);
         break;
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -121,22 +188,6 @@ gnc_object_references_dialog_class_init (GncObjectReferencesDialogClass *klass)
         g_param_spec_pointer ("object-list", "Object list", "Borrowed list of QofInstance objects",
                               G_PARAM_WRITABLE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
 
-    gchar *directory = gnc_path_get_gtkbuilderdir ();
-    gchar *filename = g_build_filename (directory, "dialog-object-references.glade", NULL);
-    gchar *contents = NULL;
-    gsize length = 0;
-    GError *error = NULL;
-    gboolean loaded = g_file_get_contents (filename, &contents, &length, &error);
-    g_free (filename);
-    g_free (directory);
-    if (!loaded)
-        g_error ("Could not load object references dialog: %s", error->message);
-    GBytes *template = g_bytes_new_take (contents, length);
-    GtkWidgetClass *widget_class = GTK_WIDGET_CLASS (klass);
-    gtk_widget_class_set_template (widget_class, template);
-    g_bytes_unref (template);
-    gtk_widget_class_bind_template_child (widget_class, GncObjectReferencesDialog, lbl_explanation);
-    gtk_widget_class_bind_template_child (widget_class, GncObjectReferencesDialog, hbox_list);
 }
 
 static void
@@ -150,9 +201,16 @@ gnc_object_references_dialog_response_cb (GtkDialog *dialog,
 void
 gnc_ui_object_references_show (const gchar *explanation_text, GList *objlist)
 {
-    GtkWidget *dialog = g_object_new (GNC_TYPE_OBJECT_REFERENCES_DIALOG,
-                                      "explanation", explanation_text,
-                                      "object-list", objlist, "modal", TRUE, NULL);
+    GncObjectReferencesDialog *dialog =
+        GNC_OBJECT_REFERENCES_DIALOG (g_object_new (GNC_TYPE_OBJECT_REFERENCES_DIALOG,
+                                                    "explanation", explanation_text,
+                                                    "object-list", objlist, "modal", TRUE, NULL));
+    if (!dialog->template_loaded)
+    {
+        /* The failure has already been reported to the user. */
+        gtk_widget_destroy (GTK_WIDGET (dialog));
+        return;
+    }
     g_signal_connect (dialog, "response", G_CALLBACK (gnc_object_references_dialog_response_cb), NULL);
-    gtk_widget_show_all (dialog);
+    gtk_widget_show_all (GTK_WIDGET (dialog));
 }
